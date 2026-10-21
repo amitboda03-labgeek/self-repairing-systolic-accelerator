@@ -1,0 +1,5 @@
+build/
+*.vcd
+tb/*.xml
+**/__pycache__/
+.DS_Store

@@ -1,0 +1,30 @@
+name: rtl-build-and-test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rtl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install RTL tools
+        run: sudo apt-get update && sudo apt-get install -y iverilog yosys
+
+      - name: Run RTL simulation
+        run: make test
+
+      - name: Lint RTL
+        run: make lint
+
+      - name: Run synthesis smoke tests
+        run: make synth

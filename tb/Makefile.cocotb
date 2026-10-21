@@ -1,0 +1,12 @@
+TOPLEVEL_LANG = verilog
+SIM ?= verilator
+TOPLEVEL = sr_systolic_optimized
+MODULE = test_array
+
+VERILOG_SOURCES += $(PWD)/../rtl/self_repairing_systolic.sv
+VERILOG_SOURCES += $(PWD)/../rtl/variants.sv
+
+COMPILE_ARGS += -Wall --timing
+COCOTB_RESULTS_FILE ?= $(PWD)/cocotb_results.xml
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

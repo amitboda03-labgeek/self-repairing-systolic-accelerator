@@ -1,0 +1,17 @@
+{
+  "DESIGN_NAME": "sr_systolic_baseline",
+  "VERILOG_FILES": [
+    "dir::../rtl/self_repairing_systolic.sv",
+    "dir::../rtl/variants.sv"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 20.0,
+  "FP_CORE_UTIL": 45,
+  "PL_TARGET_DENSITY": 0.55,
+  "RUN_CTS": true,
+  "RUN_MAGIC": true,
+  "RUN_KLAYOUT": true,
+  "pdk::sky130A": {
+    "STD_CELL_LIBRARY": "sky130_fd_sc_hd"
+  }
+}
