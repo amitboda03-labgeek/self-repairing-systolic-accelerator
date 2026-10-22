@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install RTL tools
-        run: sudo apt-get update && sudo apt-get install -y iverilog yosys
+        run: sudo apt-get update && sudo apt-get install -y iverilog yosys verilator python3-venv
 
       - name: Run RTL simulation
         run: make test
@@ -28,3 +28,17 @@ jobs:
 
       - name: Run synthesis smoke tests
         run: make synth
+
+      - name: Run cocotb regression
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip cocotb
+          make cocotb
+
+      - name: Upload synthesis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthesis-reports
+          path: build/synthesis

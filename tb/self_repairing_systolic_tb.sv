@@ -3,7 +3,7 @@
 module self_repairing_systolic_tb;
     localparam integer ROWS = 8;
     localparam integer COLS = 8;
-    localparam integer PHYS_COLS = 9;
+    localparam integer PHYS_COLS = COLS + 2;
     localparam integer DATA_W = 8;
     localparam integer ACC_W = 24;
 
@@ -145,7 +145,7 @@ module self_repairing_systolic_tb;
         for (i = 0; i < ROWS; i = i + 1)
             write_activation(i, i + 1);
         for (i = 0; i < ROWS; i = i + 1)
-            for (j = 0; j < PHYS_COLS; j = j + 1)
+            for (j = 0; j < COLS; j = j + 1)
                 write_weight(i, j, i + j + 1);
 
         run_clean_inference();

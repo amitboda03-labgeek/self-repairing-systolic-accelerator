@@ -1,6 +1,8 @@
 {
   "DESIGN_NAME": "sr_systolic_optimized",
   "VERILOG_FILES": [
+    "dir::../rtl/systolic_pe.sv",
+    "dir::../rtl/systolic_array.sv",
     "dir::../rtl/self_repairing_systolic.sv",
     "dir::../rtl/variants.sv"
   ],

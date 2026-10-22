@@ -7,7 +7,7 @@ from cocotb.triggers import FallingEdge, RisingEdge
 
 ROWS = 8
 COLS = 8
-PHYS_COLS = 9
+PHYS_COLS = COLS + 2
 ACC_W = 24
 
 
@@ -41,11 +41,10 @@ async def run(dut) -> None:
     dut.start.value = 1
     await FallingEdge(dut.clk)
     dut.start.value = 0
-    while not int(dut.done.value) and not int(dut.detect_error.value):
+    # A detected fault is an intermediate state; wait for the repair
+    # transaction to finish rather than treating detect_error as completion.
+    while not int(dut.done.value) and not int(dut.repair_done.value):
         await RisingEdge(dut.clk)
-    if int(dut.detect_error.value):
-        while not int(dut.repair_done.value):
-            await RisingEdge(dut.clk)
 
 
 def signed(value: int, width: int) -> int:
@@ -71,7 +70,7 @@ async def repair_preserves_logical_outputs(dut):
     for row, value in enumerate(activations):
         await write_activation(dut, row, value)
     for row in range(ROWS):
-        for col in range(PHYS_COLS):
+        for col in range(COLS):
             await write_weight(dut, row, col, row + col + 1)
 
     await run(dut)

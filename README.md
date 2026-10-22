@@ -1,79 +1,74 @@
 # Self-repairing systolic neural accelerator
 
-This subproject implements the project described in the accompanying brief:
-an 8×8 signed-int8 weight-stationary MAC array with one spare column, online
-checksum detection, a test-sweep localiser, runtime logical remapping, and
-runtime fault injection.
+This repository contains a parameterized signed-int8 matrix-vector accelerator
+with a weight-stationary systolic data path, online error detection, and one
+spare output column for runtime repair.
 
-This repository is intentionally focused on the hardware project. The
-companion PPA sweep/reporting tool lives in the separate
-[`systolic-ppa-sweep`](https://github.com/amitboda03-labgeek/systolic-ppa-sweep)
-repository.
+## Architecture
 
-## What is implemented
+`rtl/systolic_pe.sv` implements one processing element. Each PE stores one
+weight, forwards its activation to the right on every cycle, and forwards its
+partial sum down on every cycle. `rtl/systolic_array.sv` instantiates the PE
+mesh and launches the input rows as a staggered wavefront.
 
-- `rtl/self_repairing_systolic.sv` — parameterized synthesizable core.
-- `rtl/variants.sv` — named baseline and PPA-oriented wrappers.
-- `tb/self_repairing_systolic_tb.sv` — Icarus regression test with a golden
-  matrix-vector product, injected stuck-at fault, detection, localisation,
-  spare-column repair, and post-repair equivalence checks.
-- `openlane/config.json` — OpenLane 2 configuration targeting Sky130 HD.
+The default 8×8 design has ten physical columns:
 
-The baseline evaluates each column's multiply-accumulate chain directly. The
-optimized variant registers the products to shorten the critical path and
-adds two activity reductions: zero-skipping for zero operands and a clock
-enable around the product register bank for zero activations. Both variants
-share the same repair controller and test interface, so PPA changes can be
-compared without changing functionality.
+- columns 0–7 produce the eight logical outputs;
+- column 8 is an ABFT checksum column;
+- column 9 is a spare column used for repair.
 
-The checksum is implemented as an output-channel invariant:
+When a real-column weight is written, the controller writes the corresponding
+row sum into the checksum column. During inference, the sum of the eight
+logical outputs is compared with the checksum-column output. A mismatch starts
+an all-ones diagnostic wavefront. The first physical column whose diagnostic
+output disagrees with its stored signature is retired, its weights are copied
+into the spare, and the logical-to-physical map is updated. If the spare is
+already occupied, the affected logical output is invalidated and `degraded`
+asserts.
 
-```text
-sum(observed active outputs) == sum(golden active outputs)
-```
+`rtl/variants.sv` exposes two equivalent wrappers:
 
-This is the dimensionally correct form of the ABFT relation for a vector times
-weight-matrix operation. On a mismatch, the controller sweeps all physical
-columns with an all-ones test vector, retires the first failing column, copies
-its weights into the spare, and updates the logical-to-physical map. If the
-spare has already been consumed, the affected logical channel is zeroed and
-`degraded` asserts, modelling graceful degradation after resource exhaustion.
+- `sr_systolic_baseline` uses ordinary multiplier and accumulator updates;
+- `sr_systolic_optimized` uses operand isolation for zero activations and a
+  true accumulator clock-enable condition.
 
-## Run the RTL regression
+## Verification
 
-From this directory:
+The Icarus testbench checks matrix-vector results, zero-heavy inputs, checksum
+fault detection, column localisation, spare-column repair, and graceful
+degradation after a second fault.
 
 ```sh
 make test
 ```
 
-The test produces `build/systolic.vcd` for waveform inspection. The project
-uses Icarus in this environment; the same sources are SystemVerilog-2012 and
-can be compiled with Verilator or cocotb in CI.
+The waveform is written to `build/systolic.vcd`. Verilator lint and the cocotb
+regression are also included in the CI workflow:
 
-## PPA experiment path
+```sh
+make lint
+make cocotb
+```
 
-OpenLane 2 is intentionally kept separate from functional simulation. Once an
-OpenLane 2 + Sky130 installation is available:
+## Synthesis and PPA
+
+The Yosys smoke test synthesizes both wrappers and records cell statistics in
+`build/synthesis`:
 
 ```sh
 make synth
 ```
 
-For the full parallel area/power/frequency sweep, clone the companion
-`systolic-ppa-sweep` repository beside this one and run its `make plan` or
-`make sweep` target with `ACCELERATOR_ROOT` pointing here. The optimized design
-trades product registers and a two-cycle inference latency for a shorter
-arithmetic path and lower switching when activations are sparse or zero-heavy.
+For Sky130 area, timing, and power measurements, use the OpenLane configuration
+under `openlane/`. The companion
+[`systolic-ppa-sweep`](https://github.com/amitboda03-labgeek/systolic-ppa-sweep)
+repository runs parallel experiments across clock targets, density targets,
+and design variants, then parses timing, area, and power reports into a Pareto
+plot.
 
-The current container does not include OpenLane 2, Verilator, or cocotb, so the
-checked-in Icarus test is the runnable local verification target here. No ASIC
-area or power number is invented in the absence of a completed Sky130 run.
+## Repository layout
 
-## Synthesis and CI
-
-`make synth` runs a Yosys synthesis smoke test for both wrappers. The GitHub
-Actions workflow runs RTL simulation, RTL lint, and both Yosys synthesis
-targets on every push and pull request. The full OpenLane sweep remains opt-in
-because it requires a Sky130/OpenLane installation and is not reproducible on
-a normal hosted runner.
+- `rtl/` — processing element, systolic array, controller, and wrappers.
+- `tb/` — SystemVerilog and cocotb regressions.
+- `openlane/` — Sky130/OpenLane configuration.
+- `scripts/` — simulation and Yosys smoke-test entry points.

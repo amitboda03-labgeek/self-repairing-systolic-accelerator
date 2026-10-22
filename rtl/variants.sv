@@ -1,12 +1,12 @@
 `timescale 1ns/1ps
 
-// Named wrappers make it easy to synthesize and compare the baseline and the
-// PPA-oriented implementation with the same testbench and configuration bus.
+// Named wrappers keep the verification interface identical while exposing a
+// baseline and a power-oriented PE implementation to synthesis.
 
 module sr_systolic_baseline #(
     parameter integer ROWS = 8,
     parameter integer COLS = 8,
-    parameter integer PHYS_COLS = 9,
+    parameter integer PHYS_COLS = COLS + 2,
     parameter integer DATA_W = 8,
     parameter integer ACC_W = 24
 ) (
@@ -29,7 +29,7 @@ module sr_systolic_baseline #(
 );
     self_repairing_systolic #(
         .ROWS(ROWS), .COLS(COLS), .PHYS_COLS(PHYS_COLS),
-        .DATA_W(DATA_W), .ACC_W(ACC_W), .PIPELINED(0),
+        .DATA_W(DATA_W), .ACC_W(ACC_W),
         .ZERO_SKIP(0), .CLOCK_GATED(0)
     ) u_core (
         .clk(clk), .reset_n(reset_n), .start(start),
@@ -43,10 +43,11 @@ module sr_systolic_baseline #(
         .spare_in_use(spare_in_use), .output_data(output_data)
     );
 endmodule
+
 module sr_systolic_optimized #(
     parameter integer ROWS = 8,
     parameter integer COLS = 8,
-    parameter integer PHYS_COLS = 9,
+    parameter integer PHYS_COLS = COLS + 2,
     parameter integer DATA_W = 8,
     parameter integer ACC_W = 24
 ) (
@@ -69,7 +70,7 @@ module sr_systolic_optimized #(
 );
     self_repairing_systolic #(
         .ROWS(ROWS), .COLS(COLS), .PHYS_COLS(PHYS_COLS),
-        .DATA_W(DATA_W), .ACC_W(ACC_W), .PIPELINED(1),
+        .DATA_W(DATA_W), .ACC_W(ACC_W),
         .ZERO_SKIP(1), .CLOCK_GATED(1)
     ) u_core (
         .clk(clk), .reset_n(reset_n), .start(start),

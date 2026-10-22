@@ -1,27 +1,19 @@
 `timescale 1ns/1ps
 
-// Self-repairing, weight-stationary systolic MAC array.
+// Self-repairing weight-stationary systolic neural accelerator.
 //
-// The implementation is intentionally small enough to simulate quickly and
-// inspect in a waveform.  It models one logical output channel per physical
-// column.  The final physical column is a spare; the controller can copy the
-// retired column's weights into it and redirect the logical channel through
-// the map without resetting the array.
-//
-// The checksum is evaluated over the active output channels:
-//   sum(observed outputs) == sum(golden outputs)
-// A mismatch detects corruption during normal inference.  A test sweep then
-// evaluates every physical column with an all-ones vector to localise the
-// damaged column before repair.
-
+// The data path is a real PE array: weights stay in the PEs, activations move
+// right, and partial sums move down.  Column COLS is an ABFT checksum column
+// whose row weights are the sums of the real output-column weights.  The last
+// physical column is a spare used to replace one failed output column.
 module self_repairing_systolic #(
-    parameter integer ROWS       = 8,
-    parameter integer COLS       = 8,
-    parameter integer PHYS_COLS  = 9,
-    parameter integer DATA_W     = 8,
-    parameter integer ACC_W      = 24,
-    parameter integer PIPELINED  = 0,
-    parameter integer ZERO_SKIP  = 0,
+    parameter integer ROWS        = 8,
+    parameter integer COLS        = 8,
+    parameter integer PHYS_COLS   = COLS + 2,
+    parameter integer DATA_W      = 8,
+    parameter integer WEIGHT_W    = DATA_W + $clog2(COLS),
+    parameter integer ACC_W       = 24,
+    parameter integer ZERO_SKIP   = 0,
     parameter integer CLOCK_GATED = 0
 ) (
     input  wire                         clk,
@@ -53,288 +45,299 @@ module self_repairing_systolic #(
     output reg signed [COLS*ACC_W-1:0]  output_data
 );
 
-    localparam integer SPARE_COL = PHYS_COLS - 1;
-    localparam integer COL_IDX_W = (PHYS_COLS <= 2) ? 1 : $clog2(PHYS_COLS);
-    localparam integer FSM_W     = 3;
+    localparam integer CHECKSUM_COL = COLS;
+    localparam integer SPARE_COL    = COLS + 1;
+    localparam integer ROW_IDX_W    = (ROWS <= 2) ? 1 : $clog2(ROWS);
+    localparam integer COL_IDX_W    = (PHYS_COLS <= 2) ? 1 : $clog2(PHYS_COLS);
+    localparam integer STATE_W      = 3;
 
-    localparam [FSM_W-1:0] S_IDLE     = 3'd0;
-    localparam [FSM_W-1:0] S_EVAL     = 3'd1;
-    localparam [FSM_W-1:0] S_MUL      = 3'd2;
-    localparam [FSM_W-1:0] S_ACC      = 3'd3;
-    localparam [FSM_W-1:0] S_CHECK    = 3'd4;
-    localparam [FSM_W-1:0] S_LOCALIZE = 3'd5;
-    localparam [FSM_W-1:0] S_REPAIR   = 3'd6;
+    localparam [STATE_W-1:0] S_IDLE        = 3'd0;
+    localparam [STATE_W-1:0] S_RUN_START   = 3'd1;
+    localparam [STATE_W-1:0] S_RUN_WAIT    = 3'd2;
+    localparam [STATE_W-1:0] S_TEST_START  = 3'd3;
+    localparam [STATE_W-1:0] S_TEST_WAIT   = 3'd4;
+    localparam [STATE_W-1:0] S_REPAIR_COPY = 3'd5;
 
-    reg [FSM_W-1:0] state;
-    reg [COL_IDX_W-1:0] localize_col;
+    reg [STATE_W-1:0] state;
+    reg [ROW_IDX_W-1:0] repair_row;
     reg [COL_IDX_W-1:0] repair_fault_col;
 
-    reg signed [DATA_W-1:0] weights [0:ROWS-1][0:PHYS_COLS-1];
-    reg [1:0] fault_modes [0:ROWS-1][0:PHYS_COLS-1];
+    reg signed [WEIGHT_W-1:0] weights [0:ROWS-1][0:PHYS_COLS-1];
+    reg signed [ACC_W-1:0] column_signature [0:PHYS_COLS-1];
     reg signed [DATA_W-1:0] activations [0:ROWS-1];
-
-    reg signed [ACC_W-1:0] product_pipe [0:ROWS-1][0:PHYS_COLS-1];
-    reg signed [ACC_W-1:0] computed_physical [0:PHYS_COLS-1];
-    reg signed [ACC_W-1:0] golden_physical [0:PHYS_COLS-1];
-
     reg [COL_IDX_W-1:0] logical_map [0:COLS-1];
     reg logical_valid [0:COLS-1];
 
+    wire signed [ROWS*DATA_W-1:0] activation_vector;
+    wire signed [PHYS_COLS*ACC_W-1:0] array_result;
+    wire array_start;
+    wire array_test_mode;
+    wire array_running;
+    wire array_valid;
+
+    wire array_weight_we;
+    wire [ROW_IDX_W-1:0] array_weight_row;
+    wire [COL_IDX_W-1:0] array_weight_col;
+    wire signed [WEIGHT_W-1:0] array_weight_data;
+    wire array_checksum_weight_we;
+    wire [ROW_IDX_W-1:0] array_checksum_weight_row;
+    wire signed [WEIGHT_W-1:0] array_checksum_weight_data;
+    wire array_fault_we;
+    wire [ROW_IDX_W-1:0] array_fault_row;
+    wire [COL_IDX_W-1:0] array_fault_col;
+    wire [1:0] array_fault_mode;
+
+    reg signed [WEIGHT_W-1:0] incoming_weight;
+    reg signed [WEIGHT_W-1:0] old_weight;
+    reg signed [WEIGHT_W-1:0] weight_delta;
+    reg signed [ACC_W-1:0] observed_sum;
+    reg signed [ACC_W-1:0] checksum_value;
+    reg signed [ACC_W-1:0] candidate_value;
     integer r;
     integer c;
     integer l;
-    reg signed [ACC_W-1:0] running_sum;
-    reg signed [ACC_W-1:0] next_sum;
-    reg signed [ACC_W-1:0] observed_sum;
-    reg signed [ACC_W-1:0] expected_sum;
-    reg signed [DATA_W-1:0] selected_activation;
-    reg signed [ACC_W-1:0] selected_product;
-    reg signed [ACC_W-1:0] test_observed;
-    reg signed [ACC_W-1:0] test_expected;
+    integer logical_channel;
+    integer fault_candidate;
     reg found_logical_channel;
 
-    function automatic signed [ACC_W-1:0] sign_extend_product;
-        input signed [DATA_W-1:0] lhs;
-        input signed [DATA_W-1:0] rhs;
-        reg signed [(2*DATA_W)-1:0] product;
+    function automatic signed [WEIGHT_W-1:0] extend_input_weight;
+        input signed [DATA_W-1:0] value;
         begin
-            product = lhs * rhs;
-            sign_extend_product = {{(ACC_W-(2*DATA_W)){product[(2*DATA_W)-1]}}, product};
+            extend_input_weight = {{(WEIGHT_W-DATA_W){value[DATA_W-1]}}, value};
         end
     endfunction
 
-    function automatic signed [ACC_W-1:0] apply_fault;
-        input signed [ACC_W-1:0] value;
-        input [1:0] mode;
+    function automatic signed [WEIGHT_W-1:0] checksum_weight_for_row;
+        input integer row_index;
+        input integer override_column;
+        input signed [WEIGHT_W-1:0] override_value;
+        integer column_index;
+        reg signed [WEIGHT_W-1:0] sum;
         begin
-            case (mode)
-                2'b01: apply_fault = {ACC_W{1'b0}}; // stuck at zero
-                2'b10: apply_fault = {ACC_W{1'b1}}; // stuck at one
-                2'b11: apply_fault = value ^ {{(ACC_W-1){1'b0}}, 1'b1};
-                default: apply_fault = value;
-            endcase
-        end
-    endfunction
-
-    // Direct combinational column evaluation is used by the baseline.  The
-    // optimized configuration uses the same arithmetic after registering the
-    // products, which shortens the multiply-to-accumulate path.
-    function automatic signed [ACC_W-1:0] evaluate_column;
-        input integer column;
-        input integer inject_faults;
-        input integer test_vector;
-        integer row;
-        reg signed [DATA_W-1:0] act;
-        reg signed [ACC_W-1:0] product;
-        reg signed [ACC_W-1:0] sum;
-        reg signed [ACC_W-1:0] updated_sum;
-        begin
-            sum = {ACC_W{1'b0}};
-            for (row = 0; row < ROWS; row = row + 1) begin
-                if (test_vector)
-                    act = {{(DATA_W-1){1'b0}}, 1'b1};
+            sum = {WEIGHT_W{1'b0}};
+            for (column_index = 0; column_index < COLS; column_index = column_index + 1) begin
+                if (column_index == override_column)
+                    sum = sum + override_value;
                 else
-                    act = activations[row];
-
-                product = sign_extend_product(act, weights[row][column]);
-
-                // A zero-skipping implementation removes the multiplier
-                // activity for zero operands.  Fault injection overrides the
-                // skip so injected defects remain observable in verification.
-                if (ZERO_SKIP && !test_vector &&
-                    ((act == {DATA_W{1'b0}}) ||
-                     (weights[row][column] == {DATA_W{1'b0}})) &&
-                    (fault_modes[row][column] == 2'b00))
-                    product = {ACC_W{1'b0}};
-
-                updated_sum = sum + product;
-                if (inject_faults && (fault_modes[row][column] != 2'b00))
-                    updated_sum = apply_fault(updated_sum, fault_modes[row][column]);
-                sum = updated_sum;
+                    sum = sum + weights[row_index][column_index];
             end
-            evaluate_column = sum;
+            checksum_weight_for_row = sum;
         end
     endfunction
 
-    initial begin
-        if (PHYS_COLS != (COLS + 1))
-            $display("INFO: PHYS_COLS is not COLS+1; spare is still the final physical column");
-        if (ACC_W < (2*DATA_W))
-            $display("WARNING: ACC_W is smaller than the signed product width");
-    end
+    generate
+        genvar activation_row;
+        for (activation_row = 0; activation_row < ROWS; activation_row = activation_row + 1) begin : g_activation_vector
+            assign activation_vector[activation_row*DATA_W +: DATA_W] = activations[activation_row];
+        end
+    endgenerate
+
+    assign array_start = (state == S_RUN_START) || (state == S_TEST_START);
+    assign array_test_mode = (state == S_TEST_START) || (state == S_TEST_WAIT);
+
+    assign array_weight_we =
+        (state == S_REPAIR_COPY) ||
+        ((state == S_IDLE) && !busy && weight_we && (weight_col != CHECKSUM_COL));
+    assign array_weight_row = (state == S_REPAIR_COPY) ? repair_row : weight_row;
+    assign array_weight_col = (state == S_REPAIR_COPY) ? SPARE_COL : weight_col;
+    assign array_weight_data = (state == S_REPAIR_COPY) ?
+        weights[repair_row][repair_fault_col] : extend_input_weight(weight_data);
+
+    assign array_checksum_weight_we =
+        (state == S_IDLE) && !busy && weight_we && (weight_col < COLS);
+    assign array_checksum_weight_row = weight_row;
+    assign array_checksum_weight_data = checksum_weight_for_row(
+        weight_row, weight_col, extend_input_weight(weight_data));
+
+    assign array_fault_we =
+        (state == S_REPAIR_COPY) ||
+        ((state == S_IDLE) && !busy && (fault_we || fault_clear));
+    assign array_fault_row = (state == S_REPAIR_COPY) ? repair_row : fault_row;
+    assign array_fault_col = (state == S_REPAIR_COPY) ? SPARE_COL : fault_col;
+    assign array_fault_mode = (state == S_REPAIR_COPY) ? 2'b00 :
+                              (fault_clear ? 2'b00 : fault_mode);
+
+    systolic_array #(
+        .ROWS(ROWS),
+        .COLS(COLS),
+        .PHYS_COLS(PHYS_COLS),
+        .DATA_W(DATA_W),
+        .WEIGHT_W(WEIGHT_W),
+        .ACC_W(ACC_W),
+        .ZERO_SKIP(ZERO_SKIP),
+        .CLOCK_GATED(CLOCK_GATED)
+    ) array (
+        .clk(clk),
+        .reset_n(reset_n),
+        .start(array_start),
+        .test_mode(array_test_mode),
+        .activation_vector(activation_vector),
+        .weight_we(array_weight_we),
+        .weight_row(array_weight_row),
+        .weight_col(array_weight_col),
+        .weight_data(array_weight_data),
+        .checksum_weight_we(array_checksum_weight_we),
+        .checksum_weight_row(array_checksum_weight_row),
+        .checksum_weight_data(array_checksum_weight_data),
+        .fault_we(array_fault_we),
+        .fault_row(array_fault_row),
+        .fault_col(array_fault_col),
+        .fault_mode(array_fault_mode),
+        .running(array_running),
+        .valid(array_valid),
+        .result_data(array_result)
+    );
 
     always @(posedge clk) begin
         if (!reset_n) begin
-            state         <= S_IDLE;
-            busy          <= 1'b0;
-            done          <= 1'b0;
-            detect_error  <= 1'b0;
-            repair_done   <= 1'b0;
-            degraded      <= 1'b0;
-            dead_columns  <= {PHYS_COLS{1'b0}};
-            spare_in_use  <= 1'b0;
-            output_data   <= {(COLS*ACC_W){1'b0}};
-            localize_col  <= {COL_IDX_W{1'b0}};
+            state <= S_IDLE;
+            busy <= 1'b0;
+            done <= 1'b0;
+            detect_error <= 1'b0;
+            repair_done <= 1'b0;
+            degraded <= 1'b0;
+            dead_columns <= {PHYS_COLS{1'b0}};
+            spare_in_use <= 1'b0;
+            output_data <= {(COLS*ACC_W){1'b0}};
+            repair_row <= {ROW_IDX_W{1'b0}};
             repair_fault_col <= {COL_IDX_W{1'b0}};
+
             for (r = 0; r < ROWS; r = r + 1) begin
                 activations[r] <= {DATA_W{1'b0}};
-                for (c = 0; c < PHYS_COLS; c = c + 1) begin
-                    weights[r][c] <= {DATA_W{1'b0}};
-                    fault_modes[r][c] <= 2'b00;
-                    product_pipe[r][c] <= {ACC_W{1'b0}};
-                end
+                for (c = 0; c < PHYS_COLS; c = c + 1)
+                    weights[r][c] <= {WEIGHT_W{1'b0}};
             end
-            for (c = 0; c < PHYS_COLS; c = c + 1) begin
-                computed_physical[c] <= {ACC_W{1'b0}};
-                golden_physical[c] <= {ACC_W{1'b0}};
-            end
+            for (c = 0; c < PHYS_COLS; c = c + 1)
+                column_signature[c] <= {ACC_W{1'b0}};
             for (l = 0; l < COLS; l = l + 1) begin
-                logical_map[l] <= l[COL_IDX_W-1:0];
+                logical_map[l] <= l;
                 logical_valid[l] <= 1'b1;
             end
         end else begin
-            done        <= 1'b0;
+            done <= 1'b0;
             repair_done <= 1'b0;
 
-            // Configuration writes are available while idle and remain
-            // deliberately simple so a cocotb or firmware driver can use the
-            // same interface for baseline and optimized variants.
-            if (weight_we && !busy)
-                weights[weight_row][weight_col] <= weight_data;
-            if (activation_we && !busy)
-                activations[activation_index] <= activation_data;
-            if (fault_we && !busy)
-                fault_modes[fault_row][fault_col] <= fault_mode;
-            if (fault_clear && !busy)
-                fault_modes[fault_row][fault_col] <= 2'b00;
+            if ((state == S_IDLE) && !busy) begin
+                if (activation_we)
+                    activations[activation_index] <= activation_data;
+
+                if (weight_we && (weight_col < PHYS_COLS) && (weight_col != CHECKSUM_COL)) begin
+                    incoming_weight = extend_input_weight(weight_data);
+                    old_weight = weights[weight_row][weight_col];
+                    weight_delta = incoming_weight - old_weight;
+                    weights[weight_row][weight_col] <= incoming_weight;
+                    column_signature[weight_col] <= column_signature[weight_col] + weight_delta;
+
+                    if (weight_col < COLS) begin
+                        weights[weight_row][CHECKSUM_COL] <=
+                            checksum_weight_for_row(weight_row, weight_col, incoming_weight);
+                        column_signature[CHECKSUM_COL] <=
+                            column_signature[CHECKSUM_COL] + weight_delta;
+                    end
+                end
+
+                if (start) begin
+                    busy <= 1'b1;
+                    detect_error <= 1'b0;
+                    state <= S_RUN_START;
+                end
+            end
 
             case (state)
                 S_IDLE: begin
-                    if (start) begin
-                        busy         <= 1'b1;
-                        detect_error <= 1'b0;
-                        if (PIPELINED)
-                            state <= S_MUL;
-                        else
-                            state <= S_EVAL;
-                    end
+                    // Configuration writes and a new start request are
+                    // handled above while the controller is idle.
                 end
 
-                S_EVAL: begin
-                    for (c = 0; c < PHYS_COLS; c = c + 1) begin
-                        computed_physical[c] <= evaluate_column(c, 1, 0);
-                        golden_physical[c] <= evaluate_column(c, 0, 0);
-                    end
-                    state <= S_CHECK;
+                S_RUN_START: begin
+                    state <= S_RUN_WAIT;
                 end
 
-                S_MUL: begin
-                    // Registered product stage used by the PPA-oriented
-                    // pipeline.  The optional clock-enable condition makes
-                    // the register bank quiet for an all-zero activation row.
-                    for (r = 0; r < ROWS; r = r + 1) begin
-                        for (c = 0; c < PHYS_COLS; c = c + 1) begin
-                            selected_product = sign_extend_product(activations[r], weights[r][c]);
-                            if (ZERO_SKIP &&
-                                ((activations[r] == {DATA_W{1'b0}}) ||
-                                 (weights[r][c] == {DATA_W{1'b0}})) &&
-                                (fault_modes[r][c] == 2'b00))
-                                selected_product = {ACC_W{1'b0}};
-
-                            if (CLOCK_GATED &&
-                                (activations[r] == {DATA_W{1'b0}}) &&
-                                (fault_modes[r][c] == 2'b00))
-                                product_pipe[r][c] <= {ACC_W{1'b0}};
-                            else
-                                product_pipe[r][c] <= selected_product;
-                        end
-                    end
-                    state <= S_ACC;
-                end
-
-                S_ACC: begin
-                    for (c = 0; c < PHYS_COLS; c = c + 1) begin
-                        running_sum = {ACC_W{1'b0}};
-                        for (r = 0; r < ROWS; r = r + 1) begin
-                            next_sum = running_sum + product_pipe[r][c];
-                            if (fault_modes[r][c] != 2'b00)
-                                next_sum = apply_fault(next_sum, fault_modes[r][c]);
-                            running_sum = next_sum;
-                        end
-                        computed_physical[c] <= running_sum;
-                        golden_physical[c] <= evaluate_column(c, 0, 0);
-                    end
-                    state <= S_CHECK;
-                end
-
-                S_CHECK: begin
-                    observed_sum = {ACC_W{1'b0}};
-                    expected_sum = {ACC_W{1'b0}};
-                    for (l = 0; l < COLS; l = l + 1) begin
-                        if (logical_valid[l]) begin
-                            output_data[(l*ACC_W) +: ACC_W] <= computed_physical[logical_map[l]];
-                            observed_sum = observed_sum + computed_physical[logical_map[l]];
-                            expected_sum = expected_sum + golden_physical[logical_map[l]];
-                        end else begin
-                            output_data[(l*ACC_W) +: ACC_W] <= {ACC_W{1'b0}};
-                        end
-                    end
-
-                    if (observed_sum != expected_sum) begin
-                        detect_error <= 1'b1;
-                        localize_col <= {COL_IDX_W{1'b0}};
-                        state <= S_LOCALIZE;
-                    end else begin
-                        busy <= 1'b0;
-                        done <= 1'b1;
-                        state <= S_IDLE;
-                    end
-                end
-
-                S_LOCALIZE: begin
-                    test_observed = evaluate_column(localize_col, 1, 1);
-                    test_expected = evaluate_column(localize_col, 0, 1);
-                    if ((test_observed != test_expected) &&
-                        !dead_columns[localize_col]) begin
-                        repair_fault_col <= localize_col;
-                        state <= S_REPAIR;
-                    end else if (localize_col == (PHYS_COLS-1)) begin
-                        // A checksum mismatch without a localisable active
-                        // column is retained as an error; no unsafe repair is
-                        // attempted.
-                        busy <= 1'b0;
-                        degraded <= 1'b1;
-                        state <= S_IDLE;
-                    end else begin
-                        localize_col <= localize_col + 1'b1;
-                    end
-                end
-
-                S_REPAIR: begin
-                    found_logical_channel = 1'b0;
-                    for (l = 0; l < COLS; l = l + 1) begin
-                        if (logical_valid[l] &&
-                            (logical_map[l] == repair_fault_col)) begin
-                            found_logical_channel = 1'b1;
-                            if (!spare_in_use && (repair_fault_col != SPARE_COL)) begin
-                                logical_map[l] <= SPARE_COL;
-                                for (r = 0; r < ROWS; r = r + 1) begin
-                                    weights[r][SPARE_COL] <= weights[r][repair_fault_col];
-                                    fault_modes[r][SPARE_COL] <= 2'b00;
-                                end
-                                spare_in_use <= 1'b1;
+                S_RUN_WAIT: begin
+                    if (array_valid) begin
+                        observed_sum = {ACC_W{1'b0}};
+                        for (l = 0; l < COLS; l = l + 1) begin
+                            if (logical_valid[l]) begin
+                                candidate_value = $signed(array_result[logical_map[l]*ACC_W +: ACC_W]);
+                                output_data[l*ACC_W +: ACC_W] <= candidate_value;
+                                observed_sum = observed_sum + candidate_value;
                             end else begin
-                                logical_valid[l] <= 1'b0;
+                                output_data[l*ACC_W +: ACC_W] <= {ACC_W{1'b0}};
+                            end
+                        end
+                        checksum_value = $signed(array_result[CHECKSUM_COL*ACC_W +: ACC_W]);
+
+                        if (!degraded && (observed_sum != checksum_value)) begin
+                            detect_error <= 1'b1;
+                            state <= S_TEST_START;
+                        end else begin
+                            busy <= 1'b0;
+                            done <= 1'b1;
+                            state <= S_IDLE;
+                        end
+                    end
+                end
+
+                S_TEST_START: begin
+                    state <= S_TEST_WAIT;
+                end
+
+                S_TEST_WAIT: begin
+                    if (array_valid) begin
+                        fault_candidate = -1;
+                        for (c = 0; c < PHYS_COLS; c = c + 1) begin
+                            candidate_value = $signed(array_result[c*ACC_W +: ACC_W]);
+                            if (!dead_columns[c] && (candidate_value != column_signature[c]) &&
+                                (fault_candidate < 0))
+                                fault_candidate = c;
+                        end
+
+                        if (fault_candidate < 0) begin
+                            degraded <= 1'b1;
+                            busy <= 1'b0;
+                            repair_done <= 1'b1;
+                            state <= S_IDLE;
+                        end else begin
+                            dead_columns[fault_candidate] <= 1'b1;
+                            found_logical_channel = 1'b0;
+                            logical_channel = -1;
+                            for (l = 0; l < COLS; l = l + 1) begin
+                                if (logical_valid[l] && (logical_map[l] == fault_candidate) &&
+                                    !found_logical_channel) begin
+                                    found_logical_channel = 1'b1;
+                                    logical_channel = l;
+                                end
+                            end
+
+                            if (found_logical_channel && (fault_candidate < COLS) &&
+                                !spare_in_use && !dead_columns[SPARE_COL]) begin
+                                repair_fault_col <= fault_candidate;
+                                repair_row <= {ROW_IDX_W{1'b0}};
+                                logical_map[logical_channel] <= SPARE_COL;
+                                spare_in_use <= 1'b1;
+                                column_signature[SPARE_COL] <= column_signature[fault_candidate];
+                                state <= S_REPAIR_COPY;
+                            end else begin
+                                if (found_logical_channel)
+                                    logical_valid[logical_channel] <= 1'b0;
                                 degraded <= 1'b1;
+                                busy <= 1'b0;
+                                repair_done <= 1'b1;
+                                state <= S_IDLE;
                             end
                         end
                     end
-                    dead_columns[repair_fault_col] <= 1'b1;
-                    if (!found_logical_channel)
-                        degraded <= 1'b1;
-                    repair_done <= 1'b1;
-                    busy <= 1'b0;
-                    state <= S_IDLE;
+                end
+
+                S_REPAIR_COPY: begin
+                    weights[repair_row][SPARE_COL] <= weights[repair_row][repair_fault_col];
+                    if (repair_row == ROWS-1) begin
+                        busy <= 1'b0;
+                        repair_done <= 1'b1;
+                        state <= S_IDLE;
+                    end else begin
+                        repair_row <= repair_row + 1'b1;
+                    end
                 end
 
                 default: state <= S_IDLE;

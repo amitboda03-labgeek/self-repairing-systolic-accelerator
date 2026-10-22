@@ -15,7 +15,7 @@ for variant in baseline optimized; do
     baseline) top="sr_systolic_baseline" ;;
     optimized) top="sr_systolic_optimized" ;;
   esac
-  yosys -q -p "read_verilog -sv $root_dir/rtl/self_repairing_systolic.sv $root_dir/rtl/variants.sv; hierarchy -top $top; proc; opt; check; stat" \
+  yosys -p "read_verilog -sv $root_dir/rtl/systolic_pe.sv $root_dir/rtl/systolic_array.sv $root_dir/rtl/self_repairing_systolic.sv $root_dir/rtl/variants.sv; hierarchy -top $top; proc; opt; check; stat" \
     | tee "$output_dir/${variant}.log"
 done
 
