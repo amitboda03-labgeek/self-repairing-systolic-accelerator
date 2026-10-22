@@ -16,6 +16,7 @@ async def write_weight(dut, row: int, col: int, value: int) -> None:
     dut.weight_row.value = row
     dut.weight_col.value = col
     dut.weight_data.value = value & 0xFF
+    await RisingEdge(dut.clk)
     await FallingEdge(dut.clk)
     dut.weight_we.value = 0
 
@@ -24,6 +25,7 @@ async def write_activation(dut, row: int, value: int) -> None:
     dut.activation_we.value = 1
     dut.activation_index.value = row
     dut.activation_data.value = value & 0xFF
+    await RisingEdge(dut.clk)
     await FallingEdge(dut.clk)
     dut.activation_we.value = 0
 
@@ -33,18 +35,31 @@ async def set_fault(dut, row: int, col: int, mode: int) -> None:
     dut.fault_row.value = row
     dut.fault_col.value = col
     dut.fault_mode.value = mode
+    await RisingEdge(dut.clk)
     await FallingEdge(dut.clk)
     dut.fault_we.value = 0
 
 
 async def run(dut) -> None:
+    cocotb.log.info("starting accelerator operation")
     dut.start.value = 1
+    await RisingEdge(dut.clk)
     await FallingEdge(dut.clk)
     dut.start.value = 0
     # A detected fault is an intermediate state; wait for the repair
     # transaction to finish rather than treating detect_error as completion.
-    while not int(dut.done.value) and not int(dut.repair_done.value):
+    for _ in range(200):
+        if int(dut.done.value) or int(dut.repair_done.value):
+            cocotb.log.info(
+                "accelerator operation complete: done=%d repair_done=%d "
+                "detect_error=%d spare=%d degraded=%d",
+                int(dut.done.value), int(dut.repair_done.value),
+                int(dut.detect_error.value), int(dut.spare_in_use.value),
+                int(dut.degraded.value),
+            )
+            return
         await RisingEdge(dut.clk)
+    raise AssertionError("accelerator operation did not complete within 200 cycles")
 
 
 def signed(value: int, width: int) -> int:
@@ -73,6 +88,7 @@ async def repair_preserves_logical_outputs(dut):
         for col in range(COLS):
             await write_weight(dut, row, col, row + col + 1)
 
+    cocotb.log.info("configuration loaded")
     await run(dut)
     for col in range(COLS):
         expected = sum(activations[row] * (row + col + 1) for row in range(ROWS))
@@ -80,8 +96,12 @@ async def repair_preserves_logical_outputs(dut):
         assert actual == expected
     await set_fault(dut, 2, 3, 1)
     await run(dut)
-    while not int(dut.spare_in_use.value):
+    for _ in range(200):
+        if int(dut.spare_in_use.value):
+            break
         await RisingEdge(dut.clk)
+    else:
+        raise AssertionError("fault repair did not consume the spare column")
 
     await run(dut)
     for col in range(COLS):
