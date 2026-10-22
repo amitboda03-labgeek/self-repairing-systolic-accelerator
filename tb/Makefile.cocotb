@@ -2,6 +2,7 @@ TOPLEVEL_LANG = verilog
 SIM ?= verilator
 TOPLEVEL = sr_systolic_optimized
 MODULE = test_array
+export PYTHONPATH := $(PWD)/cocotb:$(PYTHONPATH)
 
 VERILOG_SOURCES += $(PWD)/../rtl/systolic_pe.sv
 VERILOG_SOURCES += $(PWD)/../rtl/systolic_array.sv
