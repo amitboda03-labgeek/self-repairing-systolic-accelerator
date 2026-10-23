@@ -13,6 +13,7 @@ module systolic_pe #(
     input  wire                         reset_n,
     input  wire                         clear,
     input  wire                         run_enable,
+    input  wire                         bypass,
     input  wire signed [DATA_W-1:0]     activation_in,
     output reg  signed [DATA_W-1:0]     activation_out,
     input  wire signed [ACC_W-1:0]      psum_in,
@@ -79,24 +80,35 @@ module systolic_pe #(
                 // The activation path always advances one PE per cycle.
                 activation_out <= activation_in;
 
-                // Operand isolation holds the multiplier's activation input
-                // at zero during an idle wavefront instead of repeatedly
-                // toggling the multiplier inputs.
-                if (ZERO_SKIP && (activation_in == {DATA_W{1'b0}}) &&
-                    (fault_mode_reg == 2'b00)) begin
+                // A retired physical column remains in the wavefront so
+                // downstream columns keep their timing, but its arithmetic
+                // is bypassed.  The controller selects the spare output for
+                // the retired logical channel.
+                if (bypass) begin
                     isolated_activation <= {DATA_W{1'b0}};
+                    psum_out <= psum_in;
                 end else begin
-                    isolated_activation <= activation_in;
-                end
 
-                // A clock-gated accumulator holds its state when the PE has
-                // no new work.  It does not write a replacement zero value.
-                if (!(CLOCK_GATED &&
-                      (activation_in == {DATA_W{1'b0}}) &&
-                      (isolated_activation == {DATA_W{1'b0}}) &&
-                      (psum_in == psum_out) &&
-                      (fault_mode_reg == 2'b00))) begin
-                    psum_out <= faulted_value;
+                    // Operand isolation holds the multiplier's activation
+                    // input at zero during an idle wavefront instead of
+                    // repeatedly toggling the multiplier inputs.
+                    if (ZERO_SKIP && (activation_in == {DATA_W{1'b0}}) &&
+                        (fault_mode_reg == 2'b00)) begin
+                        isolated_activation <= {DATA_W{1'b0}};
+                    end else begin
+                        isolated_activation <= activation_in;
+                    end
+
+                    // A clock-gated accumulator holds its state when the PE
+                    // has no new work.  It does not write a replacement zero
+                    // value.
+                    if (!(CLOCK_GATED &&
+                          (activation_in == {DATA_W{1'b0}}) &&
+                          (isolated_activation == {DATA_W{1'b0}}) &&
+                          (psum_in == psum_out) &&
+                          (fault_mode_reg == 2'b00))) begin
+                        psum_out <= faulted_value;
+                    end
                 end
             end
         end

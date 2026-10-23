@@ -2,7 +2,9 @@ TOPLEVEL_LANG = verilog
 SIM ?= verilator
 TOPLEVEL = sr_systolic_optimized
 MODULE = test_array
+ROOT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 export PYTHONPATH := $(PWD)/cocotb:$(PYTHONPATH)
+export RTL_METRICS_FILE ?= $(ROOT_DIR)/build/rtl_metrics.json
 
 VERILOG_SOURCES += $(PWD)/../rtl/systolic_pe.sv
 VERILOG_SOURCES += $(PWD)/../rtl/systolic_array.sv
@@ -10,6 +12,6 @@ VERILOG_SOURCES += $(PWD)/../rtl/self_repairing_systolic.sv
 VERILOG_SOURCES += $(PWD)/../rtl/variants.sv
 
 COMPILE_ARGS += -Wall --Wno-fatal --timing
-COCOTB_RESULTS_FILE ?= $(PWD)/cocotb_results.xml
+COCOTB_RESULTS_FILE ?= $(ROOT_DIR)/cocotb_results.xml
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

@@ -72,6 +72,7 @@ module self_repairing_systolic #(
     wire signed [PHYS_COLS*ACC_W-1:0] array_result;
     wire array_start;
     wire array_test_mode;
+    wire [PHYS_COLS-1:0] array_bypass_columns;
     wire array_running;
     wire array_valid;
 
@@ -134,6 +135,7 @@ module self_repairing_systolic #(
 
     assign array_start = (state == S_RUN_START) || (state == S_TEST_START);
     assign array_test_mode = (state == S_TEST_START) || (state == S_TEST_WAIT);
+    assign array_bypass_columns = dead_columns;
 
     assign array_weight_we =
         (state == S_REPAIR_COPY) ||
@@ -171,6 +173,7 @@ module self_repairing_systolic #(
         .reset_n(reset_n),
         .start(array_start),
         .test_mode(array_test_mode),
+        .bypass_columns(array_bypass_columns),
         .activation_vector(activation_vector),
         .weight_we(array_weight_we),
         .weight_row(array_weight_row),

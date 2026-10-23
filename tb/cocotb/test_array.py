@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge
@@ -40,7 +44,7 @@ async def set_fault(dut, row: int, col: int, mode: int) -> None:
     dut.fault_we.value = 0
 
 
-async def run(dut) -> None:
+async def run(dut, label: str, metrics: list[dict[str, int | str]]) -> None:
     cocotb.log.info("starting accelerator operation")
     dut.start.value = 1
     await RisingEdge(dut.clk)
@@ -48,7 +52,13 @@ async def run(dut) -> None:
     dut.start.value = 0
     # A detected fault is an intermediate state; wait for the repair
     # transaction to finish rather than treating detect_error as completion.
+    cycles = 0
+    detection_cycles = None
     for _ in range(200):
+        await RisingEdge(dut.clk)
+        cycles += 1
+        if detection_cycles is None and int(dut.detect_error.value):
+            detection_cycles = cycles
         if int(dut.done.value) or int(dut.repair_done.value):
             cocotb.log.info(
                 "accelerator operation complete: done=%d repair_done=%d "
@@ -57,8 +67,17 @@ async def run(dut) -> None:
                 int(dut.detect_error.value), int(dut.spare_in_use.value),
                 int(dut.degraded.value),
             )
+            metrics.append(
+                {
+                    "label": label,
+                    "completion_cycles": cycles,
+                    "detection_cycles": detection_cycles or 0,
+                    "repair_cycles": (cycles - detection_cycles)
+                    if detection_cycles is not None
+                    else 0,
+                }
+            )
             return
-        await RisingEdge(dut.clk)
     raise AssertionError("accelerator operation did not complete within 200 cycles")
 
 
@@ -82,6 +101,7 @@ async def repair_preserves_logical_outputs(dut):
     dut.reset_n.value = 1
 
     activations = list(range(1, ROWS + 1))
+    metrics: list[dict[str, int | str]] = []
     for row, value in enumerate(activations):
         await write_activation(dut, row, value)
     for row in range(ROWS):
@@ -89,13 +109,13 @@ async def repair_preserves_logical_outputs(dut):
             await write_weight(dut, row, col, row + col + 1)
 
     cocotb.log.info("configuration loaded")
-    await run(dut)
+    await run(dut, "clean_inference", metrics)
     for col in range(COLS):
         expected = sum(activations[row] * (row + col + 1) for row in range(ROWS))
         actual = signed(int(dut.output_data.value) >> (col * ACC_W), ACC_W)
         assert actual == expected
     await set_fault(dut, 2, 3, 1)
-    await run(dut)
+    await run(dut, "fault_detection_and_repair", metrics)
     for _ in range(200):
         if int(dut.spare_in_use.value):
             break
@@ -103,8 +123,14 @@ async def repair_preserves_logical_outputs(dut):
     else:
         raise AssertionError("fault repair did not consume the spare column")
 
-    await run(dut)
+    await run(dut, "post_repair_inference", metrics)
     for col in range(COLS):
         expected = sum(activations[row] * (row + col + 1) for row in range(ROWS))
         actual = signed(int(dut.output_data.value) >> (col * ACC_W), ACC_W)
         assert actual == expected
+
+    metrics_path = Path(
+        os.environ.get("RTL_METRICS_FILE", "../build/rtl_metrics.json")
+    )
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.write_text(json.dumps({"operations": metrics}, indent=2) + "\n")

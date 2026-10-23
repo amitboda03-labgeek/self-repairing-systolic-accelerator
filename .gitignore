@@ -1,5 +1,8 @@
 build/
 *.vcd
 tb/*.xml
+cocotb_results.xml
+.venv/
+tb/sim_build/
 **/__pycache__/
 .DS_Store

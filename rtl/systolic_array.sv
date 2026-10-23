@@ -17,6 +17,7 @@ module systolic_array #(
     input  wire                                  reset_n,
     input  wire                                  start,
     input  wire                                  test_mode,
+    input  wire [PHYS_COLS-1:0]                  bypass_columns,
     input  wire signed [ROWS*DATA_W-1:0]         activation_vector,
 
     input  wire                                  weight_we,
@@ -102,6 +103,7 @@ module systolic_array #(
                     .reset_n(reset_n),
                     .clear(start),
                     .run_enable(pe_run_enable),
+                    .bypass(bypass_columns[col]),
                     .activation_in(activation_in[row][col]),
                     .activation_out(activation_out[row][col]),
                     .psum_in(psum_in[row][col]),

@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install RTL tools
-        run: sudo apt-get update && sudo apt-get install -y iverilog yosys verilator python3-venv
+        run: sudo apt-get update && sudo apt-get install -y iverilog yosys verilator python3-venv python3-numpy
 
       - name: Run RTL simulation
         run: make test
@@ -36,9 +36,18 @@ jobs:
           python -m pip install --upgrade pip 'cocotb<2'
           make cocotb
 
+      - name: Generate activity and fault-accuracy evidence
+        run: |
+          make activity
+          make experiment-smoke
+
       - name: Upload synthesis reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: synthesis-reports
-          path: build/synthesis
+          path: |
+            build/synthesis
+            build/rtl_metrics.json
+            build/activity.saif
+            build/fault-experiment
